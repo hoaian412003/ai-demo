@@ -1,0 +1,102 @@
+name: Issue — Create Branch & Coder Workspace
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  setup:
+    name: Branch + Workspace
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push the new branch
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Create issue branch ─────────────────────────────────────────────
+      - name: Create issue branch
+        id: branch
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          SLUG=$(echo "$ISSUE_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -cs 'a-z0-9' '-' \
+            | sed 's/^-//;s/-$//' \
+            | cut -c1-50)
+          BRANCH="issue/${{ github.event.issue.number }}-${SLUG}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git push origin "$BRANCH"
+          echo "Created branch: $BRANCH"
+
+      # ── 3. Resolve AI model from labels ────────────────────────────────────
+      - name: Resolve AI model
+        id: model
+        env:
+          LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          IS_HARD=$(echo "$LABELS_JSON" \
+            | jq -r '[.[].name | ascii_downcase] | any(. == "hard") | tostring')
+
+          if [ "$IS_HARD" = "true" ]; then
+            echo "value=nine/senior-coder" >> "$GITHUB_OUTPUT"
+            echo "Label 'hard' detected → nine/senior-coder"
+          else
+            echo "value=nine/junior-coder" >> "$GITHUB_OUTPUT"
+            echo "No 'hard' label → nine/junior-coder"
+          fi
+
+      # ── 4. Create Coder workspace ──────────────────────────────────────────
+      - name: Create Coder workspace
+        env:
+          TASK_PROMPT: ${{ github.event.issue.body }}
+          AI_API_KEY:  ${{ secrets.AI_API_KEY }}
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg name        "issue-${{ github.event.issue.number }}" \
+            --arg template_id "${{ secrets.CODER_TEMPLATE_ID }}" \
+            --arg ai_api_key  "$AI_API_KEY" \
+            --arg ai_model    "${{ steps.model.outputs.value }}" \
+            --arg branch      "${{ steps.branch.outputs.name }}" \
+            --arg repository  "https://github.com/${{ github.repository }}" \
+            --arg task_prompt "$TASK_PROMPT" \
+            '{
+              name: $name,
+              template_id: $template_id,
+              rich_parameter_values: [
+                { name: "ai_api_key",      value: $ai_api_key },
+                { name: "ai_model",        value: $ai_model },
+                { name: "branch",          value: $branch },
+                { name: "repository",      value: $repository },
+                { name: "nodejs_version",  value: "22" },
+                { name: "task_prompt",     value: $task_prompt }
+              ]
+            }')
+
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/coder_response.json \
+            -w "%{http_code}" \
+            -X POST "${{ secrets.CODER_URL }}/api/v2/users/me/workspaces" \
+            -H "Coder-Session-Token: $CODER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "Coder API response (HTTP $HTTP_STATUS):"
+          cat /tmp/coder_response.json | jq . || cat /tmp/coder_response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "::error::Failed to create Coder workspace (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          WORKSPACE_NAME=$(jq -r '.name' /tmp/coder_response.json)
+          WORKSPACE_ID=$(jq -r '.id'   /tmp/coder_response.json)
+          echo "Workspace created: $WORKSPACE_NAME ($WORKSPACE_ID)"
