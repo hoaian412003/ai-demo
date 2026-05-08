@@ -53,7 +53,41 @@ jobs:
             echo "No 'hard' label → nine/junior-coder"
           fi
 
-      # ── 4. Create Coder workspace ──────────────────────────────────────────
+      # ── 4. Resolve template name → UUID ───────────────────────────────────
+      - name: Resolve Coder template ID
+        id: template
+        env:
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+        run: |
+          TEMPLATE_NAME="${{ secrets.CODER_TEMPLATE_NAME }}"
+
+          # If the value already looks like a UUID, use it directly.
+          if echo "$TEMPLATE_NAME" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "id=$TEMPLATE_NAME" >> "$GITHUB_OUTPUT"
+            echo "Template ID (UUID passed directly): $TEMPLATE_NAME"
+            exit 0
+          fi
+
+          # Otherwise look it up by name under the default organisation.
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/template_response.json \
+            -w "%{http_code}" \
+            "${{ secrets.CODER_URL }}/api/v2/organizations/default/templates/$TEMPLATE_NAME" \
+            -H "Coder-Session-Token: $CODER_TOKEN")
+
+          echo "Template lookup response (HTTP $HTTP_STATUS):"
+          cat /tmp/template_response.json | jq . || cat /tmp/template_response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::Could not resolve template '$TEMPLATE_NAME' (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          TEMPLATE_ID=$(jq -r '.id' /tmp/template_response.json)
+          echo "id=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
+          echo "Resolved template '$TEMPLATE_NAME' → $TEMPLATE_ID"
+
+      # ── 5. Create Coder workspace ──────────────────────────────────────────
       - name: Create Coder workspace
         env:
           TASK_PROMPT: ${{ github.event.issue.body }}
@@ -62,7 +96,7 @@ jobs:
         run: |
           PAYLOAD=$(jq -n \
             --arg name        "issue-${{ github.event.issue.number }}" \
-            --arg template_id "${{ secrets.CODER_TEMPLATE_ID }}" \
+            --arg template_id "${{ steps.template.outputs.id }}" \
             --arg ai_api_key  "$AI_API_KEY" \
             --arg ai_model    "${{ steps.model.outputs.value }}" \
             --arg branch      "${{ steps.branch.outputs.name }}" \
