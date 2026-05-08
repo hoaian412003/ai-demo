@@ -83,7 +83,7 @@ jobs:
             exit 1
           fi
 
-          TEMPLATE_ID=$(jq -r '.id' /tmp/template_response.json)
+          TEMPLATE_ID=$(jq -r '.[0].id' /tmp/template_response.json)
           echo "id=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
           echo "Resolved template '$TEMPLATE_NAME' → $TEMPLATE_ID"
 
