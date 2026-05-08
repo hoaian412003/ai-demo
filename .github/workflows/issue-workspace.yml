@@ -113,9 +113,9 @@ jobs:
               rich_parameter_values: [
                 { name: "ai_api_key",      value: $ai_api_key },
                 { name: "ai_model",        value: $ai_model },
-                { name: "branch",          value: $branch },
-                { name: "repository",      value: $repository },
-                { name: "nodejs_version",  value: "22" },
+                { name: "git_branch",          value: $branch },
+                { name: "git_repo",      value: $repository },
+                { name: "node_version",  value: "22" },
                 { name: "task_prompt",     value: $task_prompt }
               ]
             }')
