@@ -1,12 +1,12 @@
-name: Issue — Create Branch & Coder Workspace
+name: Issue — Branch & Coder Workspace
 
 on:
   issues:
-    types: [opened]
+    types: [opened, reopened, closed]
 
 jobs:
-  setup:
-    name: Branch + Workspace
+  manage:
+    name: Manage Workspace
     runs-on: ubuntu-latest
     permissions:
       contents: write  # needed to push the new branch
@@ -16,8 +16,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Create issue branch ─────────────────────────────────────────────
-      - name: Create issue branch
+      # ── 2. Derive branch name (all actions) ────────────────────────────────
+      - name: Derive branch name
         id: branch
         env:
           ISSUE_TITLE: ${{ github.event.issue.title }}
@@ -27,24 +27,27 @@ jobs:
             | tr -cs 'a-z0-9' '-' \
             | sed 's/^-//;s/-$//' \
             | cut -c1-50)
-          BRANCH="issue/${{ github.event.issue.number }}-${SLUG}"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "name=issue/${{ github.event.issue.number }}-${SLUG}" >> "$GITHUB_OUTPUT"
 
+      # ── 3. Create branch (opened only) ─────────────────────────────────────
+      - name: Create issue branch
+        if: github.event.action == 'opened'
+        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git push origin "$BRANCH"
-          echo "Created branch: $BRANCH"
+          git checkout -b "${{ steps.branch.outputs.name }}"
+          git push origin "${{ steps.branch.outputs.name }}"
+          echo "Created branch: ${{ steps.branch.outputs.name }}"
 
-      # ── 3. Resolve AI model from labels ────────────────────────────────────
+      # ── 4. Resolve AI model (opened / reopened) ────────────────────────────
       - name: Resolve AI model
+        if: github.event.action != 'closed'
         id: model
         env:
           LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
         run: |
           IS_HARD=$(echo "$LABELS_JSON" \
             | jq -r '[.[].name | ascii_downcase] | any(. == "hard") | tostring')
-
           if [ "$IS_HARD" = "true" ]; then
             echo "value=nine/senior-coder" >> "$GITHUB_OUTPUT"
             echo "Label 'hard' detected → nine/senior-coder"
@@ -53,8 +56,9 @@ jobs:
             echo "No 'hard' label → nine/junior-coder"
           fi
 
-      # ── 4. Resolve template name → UUID ───────────────────────────────────
+      # ── 5. Resolve template name → UUID (opened / reopened) ────────────────
       - name: Resolve Coder template ID
+        if: github.event.action != 'closed'
         id: template
         env:
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
@@ -87,8 +91,9 @@ jobs:
           echo "id=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
           echo "Resolved template '$TEMPLATE_NAME' → $TEMPLATE_ID"
 
-      # ── 5. Create Coder workspace ──────────────────────────────────────────
+      # ── 6. Create Coder workspace (opened / reopened) ──────────────────────
       - name: Create Coder workspace
+        if: github.event.action != 'closed'
         env:
           TASK_PROMPT: ${{ github.event.issue.body }}
           AI_API_KEY:  ${{ secrets.AI_API_KEY }}
@@ -134,3 +139,51 @@ jobs:
           WORKSPACE_NAME=$(jq -r '.name' /tmp/coder_response.json)
           WORKSPACE_ID=$(jq -r '.id'   /tmp/coder_response.json)
           echo "Workspace created: $WORKSPACE_NAME ($WORKSPACE_ID)"
+
+      # ── 7. Delete Coder workspace (closed) ─────────────────────────────────
+      - name: Delete Coder workspace
+        if: github.event.action == 'closed'
+        env:
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+        run: |
+          WORKSPACE_NAME="issue-${{ github.event.issue.number }}"
+
+          # Look up workspace by name.
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/ws_list.json \
+            -w "%{http_code}" \
+            "${{ secrets.CODER_URL }}/api/v2/workspaces?owner=me&name=$WORKSPACE_NAME" \
+            -H "Coder-Session-Token: $CODER_TOKEN")
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::warning::Could not list workspaces (HTTP $HTTP_STATUS) — skipping delete"
+            cat /tmp/ws_list.json
+            exit 0
+          fi
+
+          WORKSPACE_ID=$(jq -r '.workspaces[0].id // empty' /tmp/ws_list.json)
+
+          if [ -z "$WORKSPACE_ID" ]; then
+            echo "No workspace named '$WORKSPACE_NAME' found — nothing to delete."
+            exit 0
+          fi
+
+          echo "Deleting workspace $WORKSPACE_NAME ($WORKSPACE_ID)..."
+
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/delete_response.json \
+            -w "%{http_code}" \
+            -X POST "${{ secrets.CODER_URL }}/api/v2/workspaces/$WORKSPACE_ID/builds" \
+            -H "Coder-Session-Token: $CODER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"transition": "delete"}')
+
+          echo "Delete response (HTTP $HTTP_STATUS):"
+          cat /tmp/delete_response.json | jq . || cat /tmp/delete_response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "::error::Failed to delete workspace (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          echo "Workspace deletion initiated: $WORKSPACE_NAME"
