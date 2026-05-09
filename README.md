@@ -43,7 +43,7 @@ Agent behaviour is defined in [`.agents/`](.agents/):
 
 | File | Used when |
 |------|-----------|
-| [`.agents/AGENTS.md`](.agents/senior.md) | Start Coding on Project
+| [`.agents/AGENTS.md`](.agents/AGENTS.md) | Start Coding on Project
 
 ---
 
