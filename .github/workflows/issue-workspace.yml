@@ -105,12 +105,27 @@ jobs:
           Workspace configuration:
           - template_id: ${{ steps.template.outputs.id }}
           - workspace_name: issue-${{ github.event.issue.number }}
-          - git_branch: ${{ steps.branch.outputs.name }}
-          - git_repo: https://github.com/${{ github.repository }}
           - node_version: 22
 
+          "rich_parameter_values": [
+            {
+              "name": "git_branch",
+              "value": "${{ steps.branch.outputs.name }}"
+            },
+            {
+              "name": "git_repo",
+              "value": "https://github.com/${{ github.repository }}"
+            }
+          ],
+
+          Workspace Task:
+          /home/coder/project
+          NOTE: Please cd to /home/coder/project before starting the task.
+
           Task:
-          $TASK_PROMPT"
+          $TASK_PROMPT
+
+          Commit your changes with the branch name as the commit message, and push to origin when done.
 
           PAYLOAD=$(jq -n \
             --arg org_id   "${{ steps.template.outputs.org_id }}" \
