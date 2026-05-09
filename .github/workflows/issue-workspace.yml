@@ -39,8 +39,8 @@ jobs:
           git push origin "${{ steps.branch.outputs.name }}"
           echo "Created branch: ${{ steps.branch.outputs.name }}"
 
-      # ── 4. Resolve AI model (opened / reopened) ────────────────────────────
-      - name: Resolve AI model
+      # ── 4. Resolve model config ID from labels (opened / reopened) ─────────
+      - name: Resolve AI model config
         if: github.event.action != 'closed'
         id: model
         env:
@@ -49,15 +49,15 @@ jobs:
           IS_HARD=$(echo "$LABELS_JSON" \
             | jq -r '[.[].name | ascii_downcase] | any(. == "hard") | tostring')
           if [ "$IS_HARD" = "true" ]; then
-            echo "value=nine/senior-coder" >> "$GITHUB_OUTPUT"
-            echo "Label 'hard' detected → nine/senior-coder"
+            echo "config_id=${{ secrets.CODER_MODEL_SENIOR_ID }}" >> "$GITHUB_OUTPUT"
+            echo "Label 'hard' detected → senior-coder model config"
           else
-            echo "value=nine/junior-coder" >> "$GITHUB_OUTPUT"
-            echo "No 'hard' label → nine/junior-coder"
+            echo "config_id=${{ secrets.CODER_MODEL_JUNIOR_ID }}" >> "$GITHUB_OUTPUT"
+            echo "No 'hard' label → junior-coder model config"
           fi
 
-      # ── 5. Resolve template name → UUID (opened / reopened) ────────────────
-      - name: Resolve Coder template ID
+      # ── 5. Resolve template name → UUID + org ID (opened / reopened) ───────
+      - name: Resolve Coder template
         if: github.event.action != 'closed'
         id: template
         env:
@@ -65,21 +65,22 @@ jobs:
         run: |
           TEMPLATE_NAME="${{ secrets.CODER_TEMPLATE_NAME }}"
 
-          # If the value already looks like a UUID, use it directly.
+          # If the value already looks like a UUID, we still need the org — skip lookup only if org is also provided.
           if echo "$TEMPLATE_NAME" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
             echo "id=$TEMPLATE_NAME" >> "$GITHUB_OUTPUT"
-            echo "Template ID (UUID passed directly): $TEMPLATE_NAME"
+            echo "org_id=${{ secrets.CODER_ORG_ID }}" >> "$GITHUB_OUTPUT"
+            echo "Template ID (UUID passed directly)"
             exit 0
           fi
 
-          # Otherwise look it up by name under the default organisation.
+          # Look up by name — response is an array.
           HTTP_STATUS=$(curl -s \
             -o /tmp/template_response.json \
             -w "%{http_code}" \
             "${{ secrets.CODER_URL }}/api/v2/organizations/default/templates/$TEMPLATE_NAME" \
             -H "Coder-Session-Token: $CODER_TOKEN")
 
-          echo "Template lookup response (HTTP $HTTP_STATUS):"
+          echo "Template lookup (HTTP $HTTP_STATUS):"
           cat /tmp/template_response.json | jq . || cat /tmp/template_response.json
 
           if [ "$HTTP_STATUS" -ne 200 ]; then
@@ -87,58 +88,60 @@ jobs:
             exit 1
           fi
 
-          TEMPLATE_ID=$(jq -r '.[0].id' /tmp/template_response.json)
-          echo "id=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
-          echo "Resolved template '$TEMPLATE_NAME' → $TEMPLATE_ID"
+          TEMPLATE_ID=$(jq -r '.[0].id'              /tmp/template_response.json)
+          ORG_ID=$(jq -r      '.[0].organization_id' /tmp/template_response.json)
+          echo "id=$TEMPLATE_ID"   >> "$GITHUB_OUTPUT"
+          echo "org_id=$ORG_ID"   >> "$GITHUB_OUTPUT"
+          echo "Resolved: $TEMPLATE_NAME → $TEMPLATE_ID (org: $ORG_ID)"
 
-      # ── 6. Create Coder workspace (opened / reopened) ──────────────────────
-      - name: Create Coder workspace
+      # ── 6. Send task to Coder agent (opened / reopened) ───────────────────
+      - name: Send task to Coder agent
         if: github.event.action != 'closed'
         env:
           TASK_PROMPT: ${{ github.event.issue.body }}
-          AI_API_KEY:  ${{ secrets.AI_API_KEY }}
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
         run: |
+          PROMPT_TEXT="Please create a workspace with the following configuration and work on the task below.
+          Workspace configuration:
+          - template_id: ${{ steps.template.outputs.id }}
+          - workspace_name: issue-${{ github.event.issue.number }}
+          - git_branch: ${{ steps.branch.outputs.name }}
+          - git_repo: https://github.com/${{ github.repository }}
+          - node_version: 22
+
+          Task:
+          $TASK_PROMPT"
+
           PAYLOAD=$(jq -n \
-            --arg name        "issue-${{ github.event.issue.number }}" \
-            --arg template_id "${{ steps.template.outputs.id }}" \
-            --arg ai_api_key  "$AI_API_KEY" \
-            --arg ai_model    "${{ steps.model.outputs.value }}" \
-            --arg branch      "${{ steps.branch.outputs.name }}" \
-            --arg repository  "https://github.com/${{ github.repository }}" \
-            --arg task_prompt "$TASK_PROMPT" \
+            --arg org_id   "${{ steps.template.outputs.org_id }}" \
+            --arg model_id "${{ steps.model.outputs.config_id }}" \
+            --arg prompt   "$PROMPT_TEXT" \
             '{
-              name: $name,
-              template_id: $template_id,
-              rich_parameter_values: [
-                { name: "ai_api_key",      value: $ai_api_key },
-                { name: "ai_model",        value: $ai_model },
-                { name: "git_branch",          value: $branch },
-                { name: "git_repo",      value: $repository },
-                { name: "node_version",  value: "22" },
-                { name: "task_prompt",     value: $task_prompt }
+              client_type:     "api",
+              organization_id: $org_id,
+              model_config_id: $model_id,
+              content: [
+                { type: "text", text: $prompt }
               ]
             }')
 
           HTTP_STATUS=$(curl -s \
-            -o /tmp/coder_response.json \
+            -o /tmp/chat_response.json \
             -w "%{http_code}" \
-            -X POST "${{ secrets.CODER_URL }}/api/v2/users/me/workspaces" \
+            -X POST "${{ secrets.CODER_URL }}/api/experimental/chats" \
             -H "Coder-Session-Token: $CODER_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD")
 
-          echo "Coder API response (HTTP $HTTP_STATUS):"
-          cat /tmp/coder_response.json | jq . || cat /tmp/coder_response.json
+          echo "Chat response (HTTP $HTTP_STATUS):"
+          cat /tmp/chat_response.json | jq . || cat /tmp/chat_response.json
 
           if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
-            echo "::error::Failed to create Coder workspace (HTTP $HTTP_STATUS)"
+            echo "::error::Failed to send task to Coder agent (HTTP $HTTP_STATUS)"
             exit 1
           fi
 
-          WORKSPACE_NAME=$(jq -r '.name' /tmp/coder_response.json)
-          WORKSPACE_ID=$(jq -r '.id'   /tmp/coder_response.json)
-          echo "Workspace created: $WORKSPACE_NAME ($WORKSPACE_ID)"
+          echo "Task sent to Coder agent for issue #${{ github.event.issue.number }}"
 
       # ── 7. Delete Coder workspace (closed) ─────────────────────────────────
       - name: Delete Coder workspace
@@ -148,7 +151,6 @@ jobs:
         run: |
           WORKSPACE_NAME="issue-${{ github.event.issue.number }}"
 
-          # Look up workspace by name.
           HTTP_STATUS=$(curl -s \
             -o /tmp/ws_list.json \
             -w "%{http_code}" \
