@@ -125,7 +125,7 @@ jobs:
           Task:
           $TASK_PROMPT
 
-          Commit your changes with the branch name as the commit message, and push to origin when done.
+          Commit your changes with the branch name as the commit message, and push to origin when done."
 
           PAYLOAD=$(jq -n \
             --arg org_id   "${{ steps.template.outputs.org_id }}" \
