@@ -37,6 +37,29 @@ npm --version
 
 ---
 
+## How to run the Express server
+
+### Prerequisites
+- Node.js 22 (see above for nvm commands)
+- npm (comes with Node.js)
+
+### Install dependencies
+```bash
+npm install
+```
+
+### Start the server
+```bash
+npm run start
+```
+
+The server will start on port 3000 by default.
+
+### Health check endpoint
+- `GET /health-check` should return HTTP 200 and body `Service OK`
+
+---
+
 ## Agent instructions
 
 Agent behaviour is defined in [`.agents/`](.agents/):
