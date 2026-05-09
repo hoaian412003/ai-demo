@@ -119,11 +119,10 @@ jobs:
             '{
               client_type:     "api",
               organization_id: $org_id,
-              model_config_id: $model_id,
               content: [
                 { type: "text", text: $prompt }
               ]
-            }')
+            } + (if $model_id != "" then { model_config_id: $model_id } else {} end)')
 
           HTTP_STATUS=$(curl -s \
             -o /tmp/chat_response.json \
