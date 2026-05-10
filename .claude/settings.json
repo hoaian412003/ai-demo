@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:coder.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find /Users/tranhoaian/Documents/agents-demo/.claude -type f 2>/dev/null; find /Users/tranhoaian/.claude -name \"*.md\" -path \"*/skills/*\" 2>/dev/null | head -20; ls /Users/tranhoaian/.claude/ 2>/dev/null)",
+      "Read(//Users/tranhoaian/.claude/**)",
+      "Bash(mkdir -p /Users/tranhoaian/Documents/agents-demo/.claude/commands)"
+    ],
+    "additionalDirectories": [
+      "/Users/tranhoaian/Documents/agents-demo/.claude"
     ]
   }
 }

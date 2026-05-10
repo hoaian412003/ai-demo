@@ -104,6 +104,7 @@ jobs:
         env:
           TASK_PROMPT: ${{ github.event.issue.body }}
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           PROMPT_TEXT="Please create a workspace with the following configuration and work on the task below.
           Workspace configuration:
@@ -119,8 +120,13 @@ jobs:
             {
               "name": "git_repo",
               "value": "https://github.com/${{ github.repository }}"
+            },
+            {
+              "name": "git_auth_token",
+              "value": "$GH_PAT"
             }
           ],
+
 
           Workspace Task:
           /home/coder/project
