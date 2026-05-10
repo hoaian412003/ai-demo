@@ -37,6 +37,24 @@ npm --version
 
 ---
 
+## TypeScript support
+
+This project supports TypeScript. To get started:
+
+1. Edit `server.ts` for changes to your Express server.
+2. Build the project with:
+   ```bash
+   npm run build
+   ```
+3. Start the server using compiled JavaScript:
+   ```bash
+   npm run start
+   ```
+
+(Output JavaScript will be located in the `dist/` directory.)
+
+---
+
 ## How to run the Express server
 
 ### Prerequisites
