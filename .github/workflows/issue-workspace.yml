@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # needed to push the new branch
+      issues: write    # needed to post metadata comments
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
@@ -50,9 +51,11 @@ jobs:
             | jq -r '[.[].name | ascii_downcase] | any(. == "hard") | tostring')
           if [ "$IS_HARD" = "true" ]; then
             echo "config_id=${{ secrets.CODER_MODEL_SENIOR_ID }}" >> "$GITHUB_OUTPUT"
+            echo "label=senior" >> "$GITHUB_OUTPUT"
             echo "Label 'hard' detected → senior-coder model config"
           else
             echo "config_id=${{ secrets.CODER_MODEL_JUNIOR_ID }}" >> "$GITHUB_OUTPUT"
+            echo "label=junior" >> "$GITHUB_OUTPUT"
             echo "No 'hard' label → junior-coder model config"
           fi
 
@@ -97,6 +100,7 @@ jobs:
       # ── 6. Send task to Coder agent (opened / reopened) ───────────────────
       - name: Send task to Coder agent
         if: github.event.action != 'closed'
+        id: chat
         env:
           TASK_PROMPT: ${{ github.event.issue.body }}
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
@@ -153,13 +157,52 @@ jobs:
             exit 1
           fi
 
-          echo "Task sent to Coder agent for issue #${{ github.event.issue.number }}"
+          CHAT_ID=$(jq -r '.id // empty' /tmp/chat_response.json)
+          echo "chat_id=$CHAT_ID" >> "$GITHUB_OUTPUT"
+          echo "Task sent to Coder agent for issue #${{ github.event.issue.number }} (chat: $CHAT_ID)"
 
-      # ── 7. Delete Coder workspace (closed) ─────────────────────────────────
+      # ── 7. Post metadata comment on the issue (opened / reopened) ───────────
+      - name: Post agent metadata to issue
+        if: github.event.action != 'closed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHAT_ID="${{ steps.chat.outputs.chat_id }}"
+          WORKSPACE_NAME="issue-${{ github.event.issue.number }}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+          MODEL_LABEL="${{ steps.model.outputs.label }}"
+          WORKSPACE_URL="${{ secrets.CODER_URL }}/@me/$WORKSPACE_NAME"
+
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$(cat <<EOF
+          ## Agent Workspace
+
+          | Key | Value |
+          |-----|-------|
+          | **Chat ID** | \`$CHAT_ID\` |
+          | **Workspace** | [\`$WORKSPACE_NAME\`]($WORKSPACE_URL) |
+          | **Branch** | \`$BRANCH\` |
+          | **Model tier** | $MODEL_LABEL |
+
+          <!-- agent-metadata
+          chat_id: $CHAT_ID
+          workspace_name: $WORKSPACE_NAME
+          workspace_url: $WORKSPACE_URL
+          branch: $BRANCH
+          model: $MODEL_LABEL
+          issue: ${{ github.event.issue.number }}
+          -->
+          EOF
+          )"
+
+      # ── 8. Delete Coder workspace (closed) ─────────────────────────────────
       - name: Delete Coder workspace
         if: github.event.action == 'closed'
+        id: delete
         env:
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           WORKSPACE_NAME="issue-${{ github.event.issue.number }}"
 
@@ -182,6 +225,7 @@ jobs:
             exit 0
           fi
 
+          echo "workspace_id=$WORKSPACE_ID" >> "$GITHUB_OUTPUT"
           echo "Deleting workspace $WORKSPACE_NAME ($WORKSPACE_ID)..."
 
           HTTP_STATUS=$(curl -s \
@@ -201,3 +245,22 @@ jobs:
           fi
 
           echo "Workspace deletion initiated: $WORKSPACE_NAME"
+
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$(cat <<EOF
+          ## Workspace Cleaned Up
+
+          | Key | Value |
+          |-----|-------|
+          | **Workspace ID** | \`$WORKSPACE_ID\` |
+          | **Workspace name** | \`$WORKSPACE_NAME\` |
+          | **Status** | Deletion initiated |
+
+          <!-- agent-metadata-closed
+          workspace_id: $WORKSPACE_ID
+          workspace_name: $WORKSPACE_NAME
+          issue: ${{ github.event.issue.number }}
+          -->
+          EOF
+          )"
