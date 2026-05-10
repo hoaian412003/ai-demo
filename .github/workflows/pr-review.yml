@@ -1,0 +1,267 @@
+name: PR Review — Forward Feedback or Handle Merge
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+# ── Shared helper: reads chat_id from PR or issue comments ─────────────────
+# Each job below duplicates this logic because GitHub Actions jobs can't
+# share steps, but the pattern is identical.
+
+jobs:
+
+  # ── Job 1: Formal review (changes_requested / commented) ──────────────────
+  forward-review:
+    name: Forward Review Feedback to Agent
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request_review' &&
+      (github.event.review.state == 'changes_requested' || github.event.review.state == 'commented') &&
+      github.event.review.user.type != 'Bot' &&
+      startsWith(github.event.pull_request.head.ref, 'issue/')
+    permissions:
+      pull-requests: write
+      issues: read
+
+    steps:
+      # ── 1. Extract issue number from branch ─────────────────────────────────
+      - name: Extract issue number from branch
+        id: issue
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oE '^issue/([0-9]+)' | grep -oE '[0-9]+')
+          echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+
+      # ── 2. Resolve chat_id (PR comment → issue comment fallback) ────────────
+      - name: Fetch chat ID
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+
+          # Prefer agent-pr-metadata in the PR comments (set by pr-opened workflow)
+          PR_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$PR_NUM/comments" \
+            --jq '[.[].body] | join("\n")')
+          CHAT_ID=$(echo "$PR_COMMENTS" | grep 'chat_id:' | tail -1 | sed 's/.*chat_id: *//' | tr -d ' \r')
+
+          # Fallback: agent-metadata in the original issue comments
+          if [ -z "$CHAT_ID" ]; then
+            ISSUE_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUM/comments" \
+              --jq '[.[].body] | join("\n")')
+            CHAT_ID=$(echo "$ISSUE_COMMENTS" | grep 'chat_id:' | tail -1 | sed 's/.*chat_id: *//' | tr -d ' \r')
+          fi
+
+          if [ -z "$CHAT_ID" ]; then
+            echo "::error::No chat_id found in PR #$PR_NUM or issue #$ISSUE_NUM comments"
+            exit 1
+          fi
+
+          echo "chat_id=$CHAT_ID" >> "$GITHUB_OUTPUT"
+          echo "Resolved chat_id: $CHAT_ID"
+
+      # ── 3. Send review feedback to the Coder agent ──────────────────────────
+      - name: Send review feedback to Coder agent
+        env:
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+        run: |
+          CHAT_ID="${{ steps.meta.outputs.chat_id }}"
+          REVIEWER="${{ github.event.review.user.login }}"
+          STATE="${{ github.event.review.state }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+
+          MESSAGE="PR review feedback (${STATE}) from @${REVIEWER} on ${PR_URL}:
+
+          ${REVIEW_BODY}
+
+          Please address this feedback, push the updated code to the same branch, and reply when done."
+
+          PAYLOAD=$(jq -n --arg msg "$MESSAGE" '{
+            content: [{ type: "text", text: $msg }]
+          }')
+
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/msg_response.json \
+            -w "%{http_code}" \
+            -X POST "${{ secrets.CODER_URL }}/api/experimental/chats/$CHAT_ID/messages" \
+            -H "Coder-Session-Token: $CODER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "Coder response (HTTP $HTTP_STATUS):"
+          cat /tmp/msg_response.json | jq . || cat /tmp/msg_response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "::error::Failed to send review feedback to Coder agent (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          echo "Review feedback forwarded to chat $CHAT_ID"
+
+      # ── 4. Confirm on the PR that feedback was forwarded ────────────────────
+      - name: Confirm feedback forwarded on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHAT_ID="${{ steps.meta.outputs.chat_id }}"
+          REVIEWER="${{ github.event.review.user.login }}"
+
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "> [!NOTE]
+          > Feedback from @${REVIEWER}'s review has been forwarded to the Coder agent (chat \`${CHAT_ID}\`). The agent will address the comments and push updates to this branch."
+
+
+  # ── Job 2: Plain PR comment (non-bot, non-review) ─────────────────────────
+  forward-comment:
+    name: Forward PR Comment to Agent
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      github.event.comment.user.type != 'Bot' &&
+      github.actor != 'github-actions[bot]'
+    permissions:
+      pull-requests: write
+      issues: read
+
+    steps:
+      # ── 1. Fetch PR details and verify it's an issue branch ─────────────────
+      - name: Fetch PR details and check branch
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          PR_DATA=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUM")
+          BRANCH=$(echo "$PR_DATA" | jq -r '.head.ref')
+          PR_URL=$(echo "$PR_DATA"  | jq -r '.html_url')
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+
+          echo "branch=$BRANCH"   >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL"   >> "$GITHUB_OUTPUT"
+          echo "pr_state=$PR_STATE" >> "$GITHUB_OUTPUT"
+
+          if ! echo "$BRANCH" | grep -qE '^issue/[0-9]+'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Branch '$BRANCH' is not an issue branch — skipping"
+            exit 0
+          fi
+
+          if [ "$PR_STATE" = "closed" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "PR is already closed — skipping"
+            exit 0
+          fi
+
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oE '^issue/([0-9]+)' | grep -oE '[0-9]+')
+          echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "skip=false"           >> "$GITHUB_OUTPUT"
+
+      # ── 2. Resolve chat_id ──────────────────────────────────────────────────
+      - name: Fetch chat ID
+        id: meta
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          ISSUE_NUM="${{ steps.pr.outputs.issue_num }}"
+
+          PR_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$PR_NUM/comments" \
+            --jq '[.[].body] | join("\n")')
+          CHAT_ID=$(echo "$PR_COMMENTS" | grep 'chat_id:' | tail -1 | sed 's/.*chat_id: *//' | tr -d ' \r')
+
+          if [ -z "$CHAT_ID" ]; then
+            ISSUE_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUM/comments" \
+              --jq '[.[].body] | join("\n")')
+            CHAT_ID=$(echo "$ISSUE_COMMENTS" | grep 'chat_id:' | tail -1 | sed 's/.*chat_id: *//' | tr -d ' \r')
+          fi
+
+          if [ -z "$CHAT_ID" ]; then
+            echo "::warning::No chat_id found — skipping comment forward"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "chat_id=$CHAT_ID" >> "$GITHUB_OUTPUT"
+          echo "skip=false"       >> "$GITHUB_OUTPUT"
+
+      # ── 3. Send the comment to the Coder agent ──────────────────────────────
+      - name: Send comment to Coder agent
+        if: steps.pr.outputs.skip != 'true' && steps.meta.outputs.skip != 'true'
+        env:
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          CHAT_ID="${{ steps.meta.outputs.chat_id }}"
+          COMMENTER="${{ github.event.comment.user.login }}"
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+
+          MESSAGE="Comment from @${COMMENTER} on ${PR_URL}:
+
+          ${COMMENT_BODY}"
+
+          PAYLOAD=$(jq -n --arg msg "$MESSAGE" '{
+            content: [{ type: "text", text: $msg }]
+          }')
+
+          HTTP_STATUS=$(curl -s \
+            -o /tmp/msg_response.json \
+            -w "%{http_code}" \
+            -X POST "${{ secrets.CODER_URL }}/api/experimental/chats/$CHAT_ID/messages" \
+            -H "Coder-Session-Token: $CODER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "Coder response (HTTP $HTTP_STATUS):"
+          cat /tmp/msg_response.json | jq . || cat /tmp/msg_response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "::error::Failed to forward comment to Coder agent (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+          echo "Comment forwarded to chat $CHAT_ID"
+
+
+  # ── Job 3: PR merged → note completion on the original issue ──────────────
+  handle-merged:
+    name: Handle Merged PR
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'issue/')
+    permissions:
+      issues: write
+
+    steps:
+      # ── 1. Extract issue number ─────────────────────────────────────────────
+      - name: Extract issue number from branch
+        id: issue
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oE '^issue/([0-9]+)' | grep -oE '[0-9]+')
+          echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+
+      # ── 2. Leave a note on the issue ────────────────────────────────────────
+      - name: Comment on issue about merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_NUM="${{ github.event.pull_request.number }}"
+          MERGED_BY="${{ github.event.pull_request.merged_by.login }}"
+          TARGET="${{ github.event.pull_request.base.ref }}"
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+
+          gh issue comment "$ISSUE_NUM" \
+            --repo "${{ github.repository }}" \
+            --body "PR [#${PR_NUM}](${PR_URL}) was merged into \`${TARGET}\` by @${MERGED_BY}. The agent's work for this issue is complete."

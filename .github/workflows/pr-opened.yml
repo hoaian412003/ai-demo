@@ -1,0 +1,95 @@
+name: PR — Link to Issue & Post Workspace Metadata
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  link-to-issue:
+    name: Link PR to Issue Workspace
+    runs-on: ubuntu-latest
+    # Only run for branches created by the issue workflow
+    if: startsWith(github.event.pull_request.head.ref, 'issue/')
+    permissions:
+      pull-requests: write
+      issues: read
+
+    steps:
+      # ── 1. Extract issue number from branch name ───────────────────────────
+      - name: Extract issue number from branch
+        id: issue
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oE '^issue/([0-9]+)' | grep -oE '[0-9]+')
+          if [ -z "$ISSUE_NUM" ]; then
+            echo "::error::Could not extract issue number from branch '$BRANCH'"
+            exit 1
+          fi
+          echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "Branch '$BRANCH' → issue #$ISSUE_NUM"
+
+      # ── 2. Fetch agent metadata stored in the issue comment ────────────────
+      - name: Fetch agent metadata from issue
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+
+          # Concatenate all comment bodies; the agent-metadata block is in one of them
+          ALL_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUM/comments" \
+            --jq '[.[].body] | join("\n")')
+
+          extract() {
+            echo "$ALL_COMMENTS" | grep "${1}:" | tail -1 | sed "s/.*${1}: *//" | tr -d ' \r'
+          }
+
+          CHAT_ID=$(extract "chat_id")
+          WORKSPACE_NAME=$(extract "workspace_name")
+          WORKSPACE_URL=$(extract "workspace_url")
+          MODEL=$(extract "model")
+
+          echo "chat_id=$CHAT_ID"             >> "$GITHUB_OUTPUT"
+          echo "workspace_name=$WORKSPACE_NAME" >> "$GITHUB_OUTPUT"
+          echo "workspace_url=$WORKSPACE_URL"   >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL"                   >> "$GITHUB_OUTPUT"
+          echo "Metadata: chat=$CHAT_ID workspace=$WORKSPACE_NAME model=$MODEL"
+
+      # ── 3. Post metadata card as a PR comment ──────────────────────────────
+      - name: Post PR metadata comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHAT_ID="${{ steps.meta.outputs.chat_id }}"
+          WORKSPACE_NAME="${{ steps.meta.outputs.workspace_name }}"
+          WORKSPACE_URL="${{ steps.meta.outputs.workspace_url }}"
+          MODEL="${{ steps.meta.outputs.model }}"
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+          ISSUE_URL="https://github.com/${{ github.repository }}/issues/$ISSUE_NUM"
+
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$(cat <<EOF
+          ## Agent PR
+
+          This PR was created by the Coder AI agent working on issue [#${ISSUE_NUM}](${ISSUE_URL}).
+
+          | Key | Value |
+          |-----|-------|
+          | **Issue** | [#${ISSUE_NUM}](${ISSUE_URL}) |
+          | **Chat ID** | \`${CHAT_ID}\` |
+          | **Workspace** | [\`${WORKSPACE_NAME}\`](${WORKSPACE_URL}) |
+          | **Model tier** | ${MODEL} |
+
+          > **Review this PR:** merge to accept, or leave a review / comment to send feedback back to the agent.
+
+          <!-- agent-pr-metadata
+          chat_id: ${CHAT_ID}
+          workspace_name: ${WORKSPACE_NAME}
+          workspace_url: ${WORKSPACE_URL}
+          model: ${MODEL}
+          issue: ${ISSUE_NUM}
+          pr: ${{ github.event.pull_request.number }}
+          -->
+          EOF
+          )"
